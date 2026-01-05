@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import plotly.express as px
 from PIL import Image
+from preprocessing import crop_breast_roi, resize_with_padding
 
 # --- CONFIGURATION ---
 EFF_MODEL_PATH = 'best_mammogram_model_phase2_final.keras'
@@ -12,41 +13,46 @@ IMG_SIZE = 224
 CLASS_NAMES = ['BI-RADS 1 (Normal)', 'BI-RADS 3 (Benign)', 'BI-RADS 4 (Suspicious)', 'BI-RADS 5 (Malignant)']
 
 # --- 1. PREPROCESSING FUNCTIONS ---
-def base_preprocessing(image_array):
-    if len(image_array.shape) == 2:
-        img = cv2.cvtColor(image_array, cv2.COLOR_GRAY2RGB)
+def advanced_preprocessing(image_array):
+    """
+    Uses the helper functions linked from preprocessing.py
+    """
+    # 1. Convert to Gray for the cropping algorithm
+    if len(image_array.shape) == 3:
+        img_gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
     else:
-        img = image_array
+        img_gray = image_array
 
-    # CLAHE
-    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    cl = clahe.apply(l)
-    img = cv2.merge((cl, a, b))
-    img = cv2.cvtColor(img, cv2.COLOR_LAB2RGB)
+    # 2. CALL THE LINKED FUNCTION: Smart Cropping
+    # This removes artifacts and black borders using logic from preprocessing.py
+    img_cropped_gray = crop_breast_roi(img_gray)
     
-    # Padding
-    old_size = img.shape[:2]
-    ratio = float(IMG_SIZE)/max(old_size)
-    new_size = tuple([int(x*ratio) for x in old_size])
-    img = cv2.resize(img, (new_size[1], new_size[0]))
+    # 3. CLAHE (Contrast Enhancement)
+    # We apply this here because it works best on Grayscale before resizing
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    img_clahe_gray = clahe.apply(img_cropped_gray)
     
-    delta_w = IMG_SIZE - new_size[1]
-    delta_h = IMG_SIZE - new_size[0]
-    top, bottom = delta_h//2, delta_h-(delta_h//2)
-    left, right = delta_w//2, delta_w-(delta_w//2)
+    # 4. Convert back to RGB (Models need 3 channels)
+    img_clahe_rgb = cv2.cvtColor(img_clahe_gray, cv2.COLOR_GRAY2RGB)
     
-    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0,0,0])
-    return img
+    # 5. CALL THE LINKED FUNCTION: Resize with Padding
+    # This resizes the image while keeping the tumor shape correct
+    img_final_rgb = resize_with_padding(img_clahe_rgb, (IMG_SIZE, IMG_SIZE))
+    
+    return img_final_rgb
 
 def preprocess_for_efficientnet(img_array):
-    img = base_preprocessing(img_array)
+    # Get the cleaned, cropped, padded image (0-255)
+    img = advanced_preprocessing(img_array)
+    # Apply EfficientNet specific scaling
     return tf.keras.applications.efficientnet.preprocess_input(img.astype(np.float32))
 
 def preprocess_for_densenet(img_array):
-    img = base_preprocessing(img_array)
+    # Get the cleaned, cropped, padded image (0-255)
+    img = advanced_preprocessing(img_array)
+    # Apply DenseNet specific scaling
     return tf.keras.applications.densenet.preprocess_input(img.astype(np.float32))
+
 
 # --- 2. XAI FUNCTIONS (Grad-CAM & Score-CAM) ---
 def make_gradcam(model, img_array, layer_name):
@@ -111,6 +117,7 @@ def make_scorecam_heatmap(model, img_array, layer_name, top_k=32):
         print(f"Score-CAM Error: {e}")
         return None
 
+
 # --- 3. UI HELPERS ---
 def plot_confidence(scores, title):
     fig = px.bar(x=CLASS_NAMES, y=scores, 
@@ -118,6 +125,7 @@ def plot_confidence(scores, title):
                  title=title, color=scores, color_continuous_scale='Bluered')
     fig.update_layout(yaxis_range=[0, 1], height=250, margin=dict(l=20, r=20, t=40, b=20))
     return fig
+
 
 # --- 4. MAIN APP ---
 st.set_page_config(page_title="Mammogram Ensemble System", layout="wide")
